@@ -14,7 +14,7 @@ const connection = mysql.createConnection({
   host: "localhost",
   user: "root",
   password: "",
-  database: "hamacbrfix",
+  database: "db_hamates",
 });
 
 function calculateSimilarity(problem, weights) {
@@ -275,10 +275,11 @@ app.post("/api/hapen", (req, res) => {
 //////////////////////////////////////////////////////////////////
 
 app.get("/api/basiskasus", (req, res) => {
-  const query = `SELECT DISTINCT basiskasus.id_basiskasus, 
-                GROUP_CONCAT(basiskasus.id_gejala) as gejala, hapen.id_hapen 
-                FROM basiskasus INNER JOIN hapen ON basiskasus.id_hapen = hapen.id_hapen 
-                GROUP BY basiskasus.id_basiskasus`;
+  const query = `SELECT basiskasus.id_basiskasus, hapen.id_hapen, hapen.nama_hapen, GROUP_CONCAT(gejala.nama_gejala) AS namaGejala, 
+                GROUP_CONCAT(gejala.id_gejala) AS idGejala, GROUP_CONCAT(basiskasus.bobot) AS bobots
+                FROM basiskasus INNER JOIN hapen ON basiskasus.id_hapen = hapen.id_hapen
+                INNER JOIN gejala ON basiskasus.id_gejala = gejala.id_gejala GROUP BY basiskasus.id_basiskasus, hapen.id_hapen
+                ORDER BY basiskasus.id_basiskasus;`;
   connection.query(query, (err, results) => {
     if (err) {
       console.error("Error fetching data:", err);
@@ -334,9 +335,9 @@ app.put("/api/basiskasus/:id", (req, res) => {
 });
 
 app.post("/api/basiskasus", (req, res) => {
-  const { id_hapen, id_gejala } = req.body;
+  const { id_hapen, gejalaData } = req.body;
 
-  if (!id_hapen || !Array.isArray(id_gejala) || id_gejala.length === 0) {
+  if (!id_hapen || gejalaData.length === 0) {
     return res.status(400).json({ message: "Invalid data format" });
   }
 
@@ -357,9 +358,14 @@ app.post("/api/basiskasus", (req, res) => {
       id_basiskasus = "BK-001";
     }
 
-    let values = id_gejala.map((gejala) => [id_basiskasus, id_hapen, gejala]);
+    let values = gejalaData.map(({ id_gejala, bobot }) => [
+      id_basiskasus,
+      id_hapen,
+      id_gejala,
+      bobot,
+    ]);
     const insertQuery =
-      "INSERT INTO basiskasus (id_basiskasus, id_hapen, id_gejala) VALUES ?";
+      "INSERT INTO basiskasus (id_basiskasus, id_hapen, id_gejala, bobot) VALUES ?";
     connection.query(insertQuery, [values], (err, result) => {
       if (err) {
         console.error("Error inserting data:", err);
@@ -408,7 +414,8 @@ app.get("/api/deteksi/:id_deteksi", (req, res) => {
   const query = `
     SELECT *
     FROM deteksi
-    JOIN hapen ON deteksi.id_hapen = hapen.id_hapen
+    JOIN basiskasus ON deteksi.id_basiskasus = basiskasus.id_basiskasus
+    JOIN hapen ON basiskasus.id_hapen = hapen.id_hapen
     WHERE id_deteksi = ?
   `;
 
@@ -430,16 +437,26 @@ app.get("/api/deteksi/:id_deteksi", (req, res) => {
 app.post("/api/deteksi", (req, res) => {
   const { id_deteksi, gejala } = req.body;
   let idHapen;
-  let resultGejala;
+  let resultGabungan;
 
-  if (!id_deteksi || !Array.isArray(gejala) || gejala.length === 0) {
-    return res.status(400).json({ message: "Invalid data format" });
-  }
+  const formattedGejalaArray = gejala.map((id) => `'${id}'`);
+  const formattedGejalaString = formattedGejalaArray.join(",");
+  const query =
+    "SELECT nama_gejala FROM gejala WHERE id_gejala IN (" +
+    formattedGejalaString +
+    ") LIMIT 0, 25";
 
+  connection.query(query, (err, resultGejala) => {
+    if (err) {
+      console.error("Error executing query:", err);
+      return res.status(500).json({ message: "Internal Server Error" });
+    }
+    const namaGejalaArray = resultGejala.map((gejala) => gejala.nama_gejala);
+    resultGabungan = namaGejalaArray.join(",");
+  });
 
   // mengecek data gejala jika sama 1 dan jika salah 0 dan menjumlah kan bobot berdasarkan id_basiskasus
-  const dataQuery =
-    "SELECT * FROM basiskasus JOIN gejala ON basiskasus.id_gejala = gejala.id_gejala";
+  const dataQuery = "SELECT * FROM basiskasus";
 
   connection.query(dataQuery, (err, result) => {
     if (err) {
@@ -493,7 +510,6 @@ app.post("/api/deteksi", (req, res) => {
     }
 
     const queryHapen = `SELECT basiskasus.id_hapen FROM basiskasus WHERE basiskasus.id_basiskasus = '${idKasusTerbesar}'`;
-
     connection.query(queryHapen, (err, resultHapen) => {
       if (err) {
         console.error("Error fetching data:", err);
@@ -503,7 +519,7 @@ app.post("/api/deteksi", (req, res) => {
       if (resultHapen.length > 0) {
         const rowHapen = resultHapen[0];
         idHapen = rowHapen.id_hapen;
-        
+
         // Memasukkan basis kasus yang baru jika similarity lebih keril dari 0,4
         if (nilaiSimilarityTerbesar < 0.4) {
           const newBasiskasusId = generateNewBasiskasusId(connection);
@@ -544,8 +560,7 @@ app.post("/api/deteksi", (req, res) => {
         jenis = "Kemungkinan penyakit sangat rendah";
       }
 
-
-      // menghasilkan nilai KNN 
+      // menghasilkan nilai KNN
       const neighbors = Object.entries(hasilPerbandingan).map(
         ([idKasus, nilaiGejala]) => {
           const bobotKasus = bobots[idKasus];
@@ -574,24 +589,7 @@ app.post("/api/deteksi", (req, res) => {
         }
       }
 
-      // mengambil nama gejala
-      const formattedGejalaArray = gejala.map((id) => `'${id}'`);
-      const formattedGejalaString = formattedGejalaArray.join(",");
-      console.log(formattedGejalaString);
-      const query =
-        "SELECT nama_gejala FROM gejala WHERE id_gejala IN (" +
-        formattedGejalaString +
-        ") LIMIT 0, 25";
-
-      connection.query(query, (err, resultGejala) => {
-        if (err) {
-          console.error("Error executing query:", err);
-          return res.status(500).json({ message: "Internal Server Error" });
-        }
-        console.log(resultGejala);
-      });
-
-      // insert knn basisKasus 
+      //
       const queryPenyakit = `SELECT hapen.* FROM hapen JOIN basiskasus ON hapen.id_hapen = basiskasus.id_hapen WHERE basiskasus.id_basiskasus = '${mostFrequentCaseId}'`;
       connection.query(queryPenyakit, (err, resultPenyakit) => {
         if (err) {
@@ -603,9 +601,8 @@ app.post("/api/deteksi", (req, res) => {
           const rowPenyakit = resultPenyakit[0];
           const namaPenyakitTerbesar = rowPenyakit.nama_hapen;
           const solusi = rowPenyakit.solusi;
-
           const tgl_deteksi = new Date().toISOString().slice(0, 10);
-          const insertDeteksi = `INSERT INTO deteksi (id_deteksi, id_hapen, id_basiskasus, gejala, hasil, similarity, jenis, solusi, tgl_deteksi) VALUES ('${id_deteksi}', '${idHapen}', '${idKasusTerbesar}', '${resultGejala}', '${namaPenyakitTerbesar}', '${nilaiSimilarityTerbesar}', '${jenis}', '${solusi}', '${tgl_deteksi}')`;
+          const insertDeteksi = `INSERT INTO deteksi (id_deteksi, id_basiskasus, gejala, hasil, similarity, jenis, solusi, tgl_deteksi) VALUES ('${id_deteksi}', '${idKasusTerbesar}', '${resultGabungan}', '${namaPenyakitTerbesar}', '${nilaiSimilarityTerbesar}', '${jenis}', '${solusi}', '${tgl_deteksi}')`;
 
           connection.query(insertDeteksi, (err, resultInsertDeteksi) => {
             if (err) {
@@ -613,9 +610,9 @@ app.post("/api/deteksi", (req, res) => {
               return res.status(500).json({ message: "Internal Server Error" });
             }
 
-            const topKNeighbors = neighbors.slice(0, K);
+            //const topKNeighbors = neighbors.slice(0, K);
 
-            const values = topKNeighbors.map((neighbor) => [
+            const values = kNearest.map((neighbor) => [
               id_deteksi,
               neighbor.id_kasus,
               neighbor.similarity,
