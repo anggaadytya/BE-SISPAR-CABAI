@@ -1,12 +1,16 @@
 const express = require("express");
 const mysql = require("mysql2");
 const cors = require("cors");
+const dotenv = require("dotenv");
+
+dotenv.config();
 
 const app = express();
-const port = 5000;
+const port = process.env.PORT;
 
 // Middleware
 app.use(cors());
+
 app.use(express.json());
 
 // MySQL Connection
@@ -14,7 +18,7 @@ const connection = mysql.createConnection({
   host: "localhost",
   user: "root",
   password: "",
-  database: "db_hamates",
+  database: process.env.DB,
 });
 
 function calculateSimilarity(problem, weights) {
